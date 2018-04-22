@@ -2,19 +2,23 @@
 
 
 from __future__ import print_function
-from vizdoom import *
 
-from random import choice
-from time import sleep
 import os
+import tensorflow as tf
+from model import DoomNeuralNetwork
+
+import numpy
+from tqdm import tqdm
+from vizdoom import *
+from visualization import plot_running_avg
 
 
 def init_game():
     game = DoomGame()
     game.set_doom_scenario_path(os.sep.join(['resources', 'scenarios', 'basic.wad']))
     game.set_doom_map("map01")
-    game.set_screen_resolution(ScreenResolution.RES_640X480)
-    game.set_screen_format(ScreenFormat.RGB24)
+    game.set_screen_resolution(ScreenResolution.RES_160X120)
+    game.set_screen_format(ScreenFormat.GRAY8)
     game.set_depth_buffer_enabled(True)
     game.set_labels_buffer_enabled(True)
     game.set_automap_buffer_enabled(True)
@@ -28,8 +32,9 @@ def init_game():
     game.set_render_messages(False)  # In-game messages
     game.set_render_corpses(False)
     game.set_render_screen_flashes(True)  # Effect upon taking damage or picking up items
-    game.add_available_button(Button.MOVE_LEFT)
-    game.add_available_button(Button.MOVE_RIGHT)
+    #game.add_available_button(Button.MOVE_FORWARD)
+    game.add_available_button(Button.TURN_LEFT)
+    game.add_available_button(Button.TURN_RIGHT)
     game.add_available_button(Button.ATTACK)
     game.add_available_game_variable(GameVariable.AMMO2)
     game.set_episode_timeout(200)
@@ -42,46 +47,55 @@ def init_game():
     return game
 
 
-def main():
-    game = init_game()
+def convert_image(image):
+    image = image / 255.0
+    return image.reshape((1, image.shape[0], image.shape[1], 1)).astype(numpy.float32)
 
-    actions = [[True, False, False], [False, True, False], [False, False, True]]
 
-    episodes = 10
+def to_one_hot(action):
+    max_position = int(numpy.argmax(action))
+    one_hot_action = numpy.zeros((len(action),))
+    one_hot_action[max_position] = 1.0
+    return one_hot_action.reshape((1, -1))
 
-    sleep_time = 1.0 / DEFAULT_TICRATE
 
-    for i in range(episodes):
-        print("Episode #" + str(i + 1))
-        game.new_episode()
+def update(model, reward, state, action, gamma):
+    next_action_predictions = model.predict(state)
+    state_action_values = numpy.zeros((len(action),))
+    max_position = int(numpy.argmax(action))
+    state_action_values[max_position] = reward + gamma * numpy.max(next_action_predictions)
+    model.update(state, state_action_values.reshape((1, -1)), to_one_hot(action))
 
-        while not game.is_episode_finished():
-            state = game.get_state()
 
-            n = state.number
-            vars = state.game_variables
-            screen_buf = state.screen_buffer
-            depth_buf = state.depth_buffer
-            labels_buf = state.labels_buffer
-            automap_buf = state.automap_buffer
-            labels = state.labels
+def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000):
+    total_reward = 0
+    dims = (None, 120, 160, 1)
+    model = DoomNeuralNetwork(session, dims, game.get_available_buttons_size())
+    session.run(tf.global_variables_initializer())
+    game.new_episode()
+    time_step = 0
+    state = convert_image(game.get_state().screen_buffer)
+    while not game.is_episode_finished() and max_steps > time_step:
+        action = model.sample_action(state, epsilon)
+        reward = game.make_action(action)
+        total_reward += reward
+        if game.get_state() is None:
+            break
+        state = convert_image(game.get_state().screen_buffer)
+        update(model, reward, state, action, gamma)
+    return total_reward
 
-            r = game.make_action(choice(actions))
 
-            print("State #" + str(n))
-            print("Game variables:", vars)
-            print("Reward:", r)
-            print("=====================")
-
-            if sleep_time > 0:
-                sleep(sleep_time)
-
-        print("Episode finished.")
-        print("Total reward:", game.get_total_reward())
-        print("************************")
-
-        game.close()
+def play_multiple_episodes(episodes=10):
+    total_rewards = numpy.empty(episodes)
+    with tf.Session() as session:
+        game = init_game()
+        for i in tqdm(range(episodes), desc='Playing episode'):
+            epsilon = 1.0 / numpy.sqrt(1 + i)
+            total_rewards[i] = play_one_episode(session, game, epsilon)
+        plot_running_avg(total_rewards)
+    game.close()
 
 
 if __name__ == '__main__':
-    main()
+    play_multiple_episodes()
