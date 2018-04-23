@@ -6,11 +6,31 @@ from __future__ import print_function
 import os
 import tensorflow as tf
 from model import DoomNeuralNetwork
+import random
+from collections import namedtuple
 
 import numpy
 from tqdm import tqdm
 from vizdoom import *
 from visualization import plot_running_avg
+
+
+Experience = namedtuple('Experience', ['state', 'action', 'reward', 'new_state'])
+
+
+class Memory:
+    def __init__(self, experience_size=100, experience_sample=4):
+        self.experience_size = experience_size
+        self.experience_sample = experience_sample
+        self.buffer = []
+
+    def sample(self):
+        return random.sample(self.buffer, self.experience_sample)
+
+    def add_sample(self, state, action, reward, new_state):
+        if len(self.buffer) >= self.experience_size:
+            self.buffer.pop()
+        self.buffer.insert(0, Experience(state, action, reward, new_state))
 
 
 def init_game():
@@ -52,28 +72,61 @@ def convert_image(image):
     return image.reshape((1, image.shape[0], image.shape[1], 1)).astype(numpy.float32)
 
 
-def to_one_hot(action):
-    max_position = int(numpy.argmax(action))
-    one_hot_action = numpy.zeros((len(action),))
-    one_hot_action[max_position] = 1.0
-    return one_hot_action.reshape((1, -1))
+def to_one_hot(actions):
+    max_positions = numpy.argmax(actions, axis=1)
+    one_hot_actions = numpy.zeros_like(actions)
+    one_hot_actions[range(actions.shape[0]), max_positions] = 1.0
+    return one_hot_actions
 
 
-def update(model, reward, state, action, gamma):
-    next_action_predictions = model.predict(state)
-    state_action_values = numpy.zeros((len(action),))
-    max_position = int(numpy.argmax(action))
-    state_action_values[max_position] = reward + gamma * numpy.max(next_action_predictions)
-    model.update(state, state_action_values.reshape((1, -1)), to_one_hot(action))
+def get_states(samples):
+    state_shape = samples[0].new_state.shape
+    states = numpy.empty((len(samples), state_shape[1], state_shape[2], state_shape[3]))
+    for i in range(len(samples)):
+        states[i] = samples[i].new_state
+    return states
 
 
-def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000):
+def get_actions(samples):
+    actions = numpy.empty((len(samples), len(samples[0].action)))
+    for i in range(len(samples)):
+        actions[i] = samples[i].action
+    return actions
+
+
+def get_rewards(samples):
+    rewards = numpy.empty((len(samples), 1))
+    for i in range(len(samples)):
+        rewards[i] = samples[i].reward
+    return rewards
+
+
+def update(model, memory, gamma):
+    if len(memory.buffer) >= memory.experience_sample:
+        samples = memory.sample()
+        # Get states tensor
+        states = get_states(samples)
+        # Get action predictions
+        next_action_predictions = model.predict(states)
+        # Get actions tensor
+        actions = get_actions(samples)
+        # Get rewards tensor
+        rewards = get_rewards(samples)
+        state_action_values = numpy.zeros_like(actions)
+        max_positions = numpy.argmax(actions, axis=1)
+        state_action_values[range(len(samples)), max_positions] = \
+            (rewards + gamma * numpy.max(next_action_predictions)).reshape((-1,))
+        model.update(states, state_action_values, to_one_hot(actions))
+
+
+def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000, experience_size=2, experience_sample=2):
     total_reward = 0
     dims = (None, 120, 160, 1)
     model = DoomNeuralNetwork(session, dims, game.get_available_buttons_size())
     session.run(tf.global_variables_initializer())
     game.new_episode()
     time_step = 0
+    memory = Memory(experience_size, experience_sample)
     state = convert_image(game.get_state().screen_buffer)
     while not game.is_episode_finished() and max_steps > time_step:
         action = model.sample_action(state, epsilon)
@@ -81,8 +134,12 @@ def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000):
         total_reward += reward
         if game.get_state() is None:
             break
-        state = convert_image(game.get_state().screen_buffer)
-        update(model, reward, state, action, gamma)
+        next_state = convert_image(game.get_state().screen_buffer)
+        # Save experience
+        memory.add_sample(state, action, reward, next_state)
+        # Update model
+        update(model, memory, gamma)
+        state = next_state
     return total_reward
 
 

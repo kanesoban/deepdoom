@@ -10,7 +10,7 @@ class NeuralNetwork:
         self.layers = layers
         with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
             self.target = tf.placeholder(tf.float32, shape=(None, output_size), name='target')
-            self.action = tf.placeholder(tf.float32, shape=(1, output_size), name='action')
+            self.action = tf.placeholder(tf.float32, shape=(None, output_size), name='action')
             self.loss_function = tf.reduce_mean(tf.square(self.action * (self.target - self.layers[-1])))
             self.learning_rate = learning_rate
             self.predict_op = self.layers[-1]
