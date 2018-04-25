@@ -101,13 +101,13 @@ def get_rewards(samples):
     return rewards
 
 
-def update(model, memory, gamma):
+def update(model, target_model, memory, gamma):
     if len(memory.buffer) >= memory.experience_sample:
         samples = memory.sample()
         # Get states tensor
         states = get_states(samples)
         # Get action predictions
-        next_action_predictions = model.predict(states)
+        next_action_predictions = target_model.predict(states)
         # Get actions tensor
         actions = get_actions(samples)
         # Get rewards tensor
@@ -119,10 +119,15 @@ def update(model, memory, gamma):
         model.update(states, state_action_values, to_one_hot(actions))
 
 
-def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000, experience_size=2, experience_sample=2):
+def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000, experience_size=2, experience_sample=2,
+                     use_target_model=True):
     total_reward = 0
     dims = (None, 120, 160, 1)
     model = DoomNeuralNetwork(session, dims, game.get_available_buttons_size())
+    if use_target_model:
+        target_model = DoomNeuralNetwork(session, dims, game.get_available_buttons_size())
+    else:
+        target_model = model
     session.run(tf.global_variables_initializer())
     game.new_episode()
     time_step = 0
@@ -138,7 +143,10 @@ def play_one_episode(session, game, epsilon, gamma=0.99, max_steps=10000, experi
         # Save experience
         memory.add_sample(state, action, reward, next_state)
         # Update model
-        update(model, memory, gamma)
+        update(model, target_model, memory, gamma)
+        # update target model
+        if not model == target_model and time_step % 100 == 0:
+            update(target_model, target_model, memory, gamma)
         state = next_state
     return total_reward
 
